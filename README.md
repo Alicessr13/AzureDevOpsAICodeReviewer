@@ -1,9 +1,3 @@
-Com base nas alterações que você fez no código — especificamente a remoção de valores *hardcoded* (como a URL da organização e o nome do campo customizado) para variáveis de ambiente —, o **README.md** precisa ser atualizado para refletir essa flexibilidade.
-
-Aqui está a versão atualizada e completa:
-
----
-
 # 🤖 Azure DevOps AI Code Reviewer (Node.js)
 
 Ferramenta CLI de automação que integra o **Azure DevOps** com o **Google Gemini AI** para realizar Code Reviews automáticos. O script analisa as alterações (diffs) dos Pull Requests, cruza com os Critérios de Aceite do Card (Work Item) vinculado e registra a análise diretamente no Azure DevOps.
