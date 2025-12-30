@@ -23,34 +23,35 @@ async function streamToString(readableStream) {
     });
 }
 
-// Função para analisar
-async function analisarPR(gitApi, prId, requirementsText) {
-    console.log(`\n--- Iniciando análise do PR #${prId} ---`);
+async function extrairCodigoPR(gitApi, prId) {
+    console.log(`\nBaixando código do PR #${prId}...`);
     
     try {
         const prDetails = await gitApi.getPullRequestById(prId);
         
         if (!prDetails) {
-            console.log(`   Erro: API retornou null para PR #${prId}.`);
-            return `<p style="color:red">Erro: PR #${prId} não encontrado/inacessível.</p>`;
+            console.log(`Erro: PR #${prId} não encontrado.`);
+            return "";
         }
 
         const repoId = prDetails.repository.id;
         const projectName = prDetails.repository.project.name;
         const prTitle = prDetails.title;
 
-        console.log(`   Título: ${prTitle}`);
-        console.log("   Baixando arquivos...");
+        // Cabeçalho para separar os contextos dos PRs na IA
+        let prContext = `\n\n################################################\n`;
+        prContext += `### INÍCIO DO PR #${prId}: ${prTitle}\n`;
+        prContext += `################################################\n`;
 
         const diffs = await gitApi.getPullRequestIterations(repoId, prId);
         if (!diffs || diffs.length === 0) {
-            return `<h3>PR #${prId}: ${prTitle}</h3><p><em>Nenhuma iteração encontrada.</em></p><hr>`;
+            return prContext + "   (Nenhuma iteração/código encontrado neste PR)\n";
         }
 
         const lastIterationId = diffs[diffs.length - 1].id;
         const changes = await gitApi.getPullRequestIterationChanges(repoId, prId, lastIterationId);
 
-        let codeContext = "";
+        let filesFound = 0;
 
         if (changes && changes.changeEntries) {
             for (const entry of changes.changeEntries) {
@@ -66,63 +67,29 @@ async function analisarPR(gitApi, prId, requirementsText) {
                     const blobStream = await gitApi.getBlobContent(repoId, objectId, projectName, true);
                     const contentText = await streamToString(blobStream);
 
-                    if (contentText.indexOf('\0') !== -1) {
-                        console.log(`   Binário ignorado: ${path}`);
-                        continue; 
-                    }
+                    if (contentText.indexOf('\0') !== -1) continue; // Ignora binários
 
-                    codeContext += `\n--- ARQUIVO: ${path} ---\n`;
-                    codeContext += contentText + "\n";
-                    console.log(`   Lido: ${path}`);
+                    prContext += `\n--- ARQUIVO: ${path} ---\n`;
+                    prContext += contentText + "\n";
+                    filesFound++;
 
                 } catch (err) {
-                    console.log(`   Erro ao ler ${path}: ${err.message}`);
+                    console.log(`Erro ao ler ${path}: ${err.message}`);
                 }
             }
         }
-
-        if (!codeContext) {
-            return `<h3>PR #${prId}: ${prTitle}</h3><p><em>Nenhum código legível.</em></p><hr>`;
-        }
-
-        console.log(`   Enviando para o Gemini...`);
-
-        const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
-        const prompt = `
-        Você é um Tech Lead. Analise este PR.
-        CONTEXTO DO CARD: ${requirementsText}
-        CÓDIGO DESTE PR: ${codeContext}
         
-        INSTRUÇÕES:
-        1. Verifique se o código atende à DESCRIÇÃO e CRITÉRIOS DE ACEITE.
-        2. Ignore estilo, foque na REGRA DE NEGÓCIO.
-        3. Ignore questões técnicas que não impactam a regra de negócio.
-        4. Foque apenas na análise de conformidade com os requisitos.
-        5. Liste os criterios atendidos e não atendidos. com um icone de ✔️ ou ❌.
-        6. Seja sucinto, objetivo e claro.
-        7. Responda de um modo que qualquer pessoa, técnica ou não, entenda.
-        `;
-
-        const result = await model.generateContent(prompt);
-        const analise = result.response.text();
-        
-        return `
-        <div style="margin-bottom: 20px; border-bottom: 1px solid #ccc; padding-bottom: 10px;">
-            <h3>Análise PR #${prId}: ${prTitle}</h3>
-            ${analise.replace(/\n/g, '<br>')}
-        </div>
-        `;
+        console.log(`${filesFound} arquivos extraídos do PR #${prId}.`);
+        return prContext;
 
     } catch (error) {
-        console.log(`   Falha interna: ${error.message}`);
-        return `<p style="color:red">Erro ao analisar PR #${prId}: ${error.message}</p>`;
+        console.log(`Falha ao extrair PR #${prId}: ${error.message}`);
+        return "";
     }
 }
 
 async function main() {
-    console.log("Iniciando script de análise...");
+    console.log("Iniciando Validador de Requisitos (Modo Consolidado)...");
 
     if (!ADO_PAT || !GOOGLE_API_KEY) process.exit(1);
 
@@ -133,8 +100,8 @@ async function main() {
         const workItemApi = await connection.getWorkItemTrackingApi();
 
         console.log("Escolha o modo de operação:");
-        console.log("1 - Analisar um Pull Request específico");
-        console.log("2 - Analisar um Card (e todos os PRs vinculados)");
+        console.log("1 - Analisar um Pull Request (e vincular ao Card)");
+        console.log("2 - Analisar um Card (e TODOS os PRs vinculados)");
         
         const modeInput = await askQuestion("-> Digite 1 ou 2: ");
         const idInput = await askQuestion("-> Digite o ID: ");
@@ -146,7 +113,6 @@ async function main() {
         let prsParaAnalisar = new Set();
 
         if (modeInput.trim() === '1') {
-            // MODO PR
             console.log(`\nBuscando Card vinculado ao PR ${ID}...`);
             const pr = await gitApi.getPullRequestById(ID);
             const workItemRefs = await gitApi.getPullRequestWorkItemRefs(pr.repository.id, ID);
@@ -157,43 +123,27 @@ async function main() {
             }
             wiId = parseInt(workItemRefs[0].url.split('/').pop());
             prsParaAnalisar.add(ID);
-
         } else {
-            // MODO CARD
             console.log(`\nBuscando PRs vinculados ao Card ${ID}...`);
             wiId = ID;
-            
             const workItemCheck = await workItemApi.getWorkItem(wiId, null, null, 1);
-            
             if (workItemCheck.relations) {
-                console.log(`Analisando ${workItemCheck.relations.length} relações...`);
-                
                 workItemCheck.relations.forEach(rel => {
                     const url = rel.url ? rel.url.toLowerCase() : '';
-                    
                     if (url.includes('pullrequestid')) {
-
                         const decodedUrl = decodeURIComponent(rel.url);
-
                         const match = decodedUrl.match(/\/(\d+)$/);
-                        
-                        if (match && match[1]) {
-                            const foundId = parseInt(match[1]);
-                            console.log(`Identificado PR #${foundId}`);
-                            prsParaAnalisar.add(foundId);
-                        } else {
+                        if (match && match[1]) prsParaAnalisar.add(parseInt(match[1]));
+                        else {
                             const parts = decodedUrl.split('/');
                             const lastPart = parts[parts.length - 1];
-                            if (!isNaN(parseInt(lastPart))) {
-                                prsParaAnalisar.add(parseInt(lastPart));
-                            }
+                            if (!isNaN(parseInt(lastPart))) prsParaAnalisar.add(parseInt(lastPart));
                         }
                     }
                 });
             }
-
             if (prsParaAnalisar.size === 0) {
-                console.error("Nenhum PR encontrado. Verifique se os links no card são realmente Pull Requests.");
+                console.error("Nenhum PR encontrado.");
                 return;
             }
         }
@@ -206,16 +156,60 @@ async function main() {
 
         const requirementsText = `TÍTULO: ${title}\nDESCRIÇÃO: ${description}\nCRITÉRIOS: ${acceptanceCriteria}`;
 
-        let relatorioFinal = `<h2>Relatório Gemini AI (${modeInput.trim() === '1' ? 'PR Único' : 'Completo'})</h2><p>Data: ${new Date().toLocaleString()}</p><hr>`;
-
+        let codigoConsolidado = "";
         const listaPrs = Array.from(prsParaAnalisar);
+        
+        console.log(`\nColetando código de ${listaPrs.length} PRs...`);
 
         for (const prId of listaPrs) {
-            const analiseHTML = await analisarPR(gitApi, prId, requirementsText);
-            relatorioFinal += analiseHTML;
+            const codigoPR = await extrairCodigoPR(gitApi, prId);
+            codigoConsolidado += codigoPR;
         }
 
-        console.log("\nAtualizando o Card com a análise...");
+        if (!codigoConsolidado) {
+            console.log("Nenhum código extraído. Abortando.");
+            return;
+        }
+
+        console.log(`\nEnviando contexto consolidado (${codigoConsolidado.length} chars) para o Gemini...`);
+
+        const genAI = new GoogleGenerativeAI(GOOGLE_API_KEY);
+        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+
+        const prompt = `
+        Você é um Tech Lead especialista em Code Review.
+        
+        CONTEXTO DO PROJETO (CARD/REQUISITOS):
+        ${requirementsText}
+        
+        CÓDIGO FONTE (Pode conter múltiplos PRs que completam a tarefa juntos):
+        ${codigoConsolidado}
+        
+        INSTRUÇÕES:
+        1. Analise o conjunto COMPLETO de códigos. Às vezes o back-end está num PR e o front-end em outro.
+        2. Verifique se a soma de todas as alterações atende à DESCRIÇÃO e CRITÉRIOS DE ACEITE.
+        3. Ignore estilo e foque na REGRA DE NEGÓCIO.
+        4. Ignore questões técnicas que não impactam a regra de negócio.
+        5. Foque apenas na análise de conformidade com os requisitos.
+        6. Liste os criterios atendidos e não atendidos. com um icone de ✔️ ou ❌.
+        7. Seja sucinto, objetivo e claro.
+        8. Responda de um modo que qualquer pessoa, técnica ou não, entenda e de forma resumida.
+        9. Retorne apenas o texto da análise, sem saudações ou despedidas.
+        10. Retorne no inicio do texto a situação final: "Aprovado ✔️" ou "Rejeitado ❌".
+        `;
+
+        const result = await model.generateContent(prompt);
+        const analise = result.response.text();
+
+        console.log("\nAtualizando o Card com a análise unificada...");
+        
+        const relatorioFinal = `
+        <h2>🤖 Análise (${listaPrs.length} PRs)</h2>
+        <p><strong>PRs Analisados:</strong> ${listaPrs.join(', ')}</p>
+        <p><strong>Data:</strong> ${new Date().toLocaleString()}</p>
+        <hr>
+        ${analise.replace(/\n/g, '<br>')}
+        `;
         
         const patchDocument = [
             {
@@ -226,7 +220,8 @@ async function main() {
         ];
 
         await workItemApi.updateWorkItem(null, patchDocument, wiId);
-        console.log(`Sucesso! Card ${wiId} atualizado.`);
+        console.log(`✅ Sucesso! Card ${wiId} atualizado com análise unificada.`);
+
     } catch (error) {
         console.error("Erro fatal:", error);
     }
