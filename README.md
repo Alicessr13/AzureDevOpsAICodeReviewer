@@ -64,6 +64,8 @@ GOOGLE_API_KEY=sua_chave_gemini_aqui
 # Exemplo: Custom.JustificativaDod ou System.History
 FIELD_UPDATE_ANALYSIS=Custom.JustificativaDod
 
+# Nome do modelo do gemini, se não for colocado um modelo espeficio utilizara o gemini-2.5-flash
+MODEL_NAME="gemini-3-flash-preview"
 ```
 
 ## 🚀 Como Utilizar
