@@ -1,19 +1,20 @@
+const express = require('express');
+const bodyParser = require('body-parser');
 const azureDevOps = require('azure-devops-node-api');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const readline = require('readline');
 require('dotenv').config();
 
 // Configurações
+const PORT = process.env.PORT || 3000;
 const ORG_URL = process.env.ORG_URL;
 const ADO_PAT = process.env.ADO_PAT;
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
 const FIELD_UPDATE_ANALYSIS = process.env.FIELD_UPDATE_ANALYSIS;
 const MODEL_NAME = process.env.MODEL_NAME || "gemini-2.5-flash";
 
-const askQuestion = (query) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-    return new Promise(resolve => rl.question(query, ans => { rl.close(); resolve(ans); }));
-};
+const app = express();
+app.use(bodyParser.json());
 
 async function streamToString(readableStream) {
     return new Promise((resolve, reject) => {
@@ -26,10 +27,10 @@ async function streamToString(readableStream) {
 
 async function extrairCodigoPR(gitApi, prId) {
     console.log(`\nBaixando código do PR #${prId}...`);
-    
+
     try {
         const prDetails = await gitApi.getPullRequestById(prId);
-        
+
         if (!prDetails) {
             console.log(`Erro: PR #${prId} não encontrado.`);
             return "";
@@ -79,7 +80,7 @@ async function extrairCodigoPR(gitApi, prId) {
                 }
             }
         }
-        
+
         console.log(`${filesFound} arquivos extraídos do PR #${prId}.`);
         return prContext;
 
@@ -89,7 +90,7 @@ async function extrairCodigoPR(gitApi, prId) {
     }
 }
 
-async function main() {
+async function processarCard(ID) {
     console.log("Iniciando Validador de Requisitos (Modo Consolidado)...");
 
     if (!ADO_PAT || !GOOGLE_API_KEY) process.exit(1);
@@ -100,53 +101,27 @@ async function main() {
         const gitApi = await connection.getGitApi();
         const workItemApi = await connection.getWorkItemTrackingApi();
 
-        console.log("Escolha o modo de operação:");
-        console.log("1 - Analisar um Pull Request (e vincular ao Card)");
-        console.log("2 - Analisar um Card (e TODOS os PRs vinculados)");
-        
-        const modeInput = await askQuestion("-> Digite 1 ou 2: ");
-        const idInput = await askQuestion("-> Digite o ID: ");
-        const ID = parseInt(idInput.trim());
-
-        if (!ID) { console.error("ID inválido."); process.exit(1); }
-
-        let wiId = null;
         let prsParaAnalisar = new Set();
-
-        if (modeInput.trim() === '1') {
-            console.log(`\nBuscando Card vinculado ao PR ${ID}...`);
-            const pr = await gitApi.getPullRequestById(ID);
-            const workItemRefs = await gitApi.getPullRequestWorkItemRefs(pr.repository.id, ID);
-
-            if (!workItemRefs || workItemRefs.length === 0) {
-                console.error("Nenhum Card vinculado a este PR.");
-                return;
-            }
-            wiId = parseInt(workItemRefs[0].url.split('/').pop());
-            prsParaAnalisar.add(ID);
-        } else {
-            console.log(`\nBuscando PRs vinculados ao Card ${ID}...`);
-            wiId = ID;
-            const workItemCheck = await workItemApi.getWorkItem(wiId, null, null, 1);
-            if (workItemCheck.relations) {
-                workItemCheck.relations.forEach(rel => {
-                    const url = rel.url ? rel.url.toLowerCase() : '';
-                    if (url.includes('pullrequestid')) {
-                        const decodedUrl = decodeURIComponent(rel.url);
-                        const match = decodedUrl.match(/\/(\d+)$/);
-                        if (match && match[1]) prsParaAnalisar.add(parseInt(match[1]));
-                        else {
-                            const parts = decodedUrl.split('/');
-                            const lastPart = parts[parts.length - 1];
-                            if (!isNaN(parseInt(lastPart))) prsParaAnalisar.add(parseInt(lastPart));
-                        }
+        wiId = ID;
+        const workItemCheck = await workItemApi.getWorkItem(wiId, null, null, 1);
+        if (workItemCheck.relations) {
+            workItemCheck.relations.forEach(rel => {
+                const url = rel.url ? rel.url.toLowerCase() : '';
+                if (url.includes('pullrequestid')) {
+                    const decodedUrl = decodeURIComponent(rel.url);
+                    const match = decodedUrl.match(/\/(\d+)$/);
+                    if (match && match[1]) prsParaAnalisar.add(parseInt(match[1]));
+                    else {
+                        const parts = decodedUrl.split('/');
+                        const lastPart = parts[parts.length - 1];
+                        if (!isNaN(parseInt(lastPart))) prsParaAnalisar.add(parseInt(lastPart));
                     }
-                });
-            }
-            if (prsParaAnalisar.size === 0) {
-                console.error("Nenhum PR encontrado.");
-                return;
-            }
+                }
+            });
+        }
+        if (prsParaAnalisar.size === 0) {
+            console.error("Nenhum PR encontrado.");
+            return;
         }
 
         console.log(`\nObtendo requisitos do Card ${wiId}...`);
@@ -159,7 +134,7 @@ async function main() {
 
         let codigoConsolidado = "";
         const listaPrs = Array.from(prsParaAnalisar);
-        
+
         console.log(`\nColetando código de ${listaPrs.length} PRs...`);
 
         for (const prId of listaPrs) {
@@ -231,12 +206,12 @@ async function main() {
             ${analise.replace(/\n/g, '<br>')}
         </div>
         `;
-        
+
         const isApproved = analise.includes("Aprovado ✔️");
         const CAMPO_STATUS = "Custom.CardAtulizado";
 
         let tagsRaw = (workItem.fields['System.Tags'] || "").split(';');
-        
+
         // 2. Limpa espaços em branco nas pontas de cada tag
         let listaTags = tagsRaw.map(tag => tag.trim()).filter(t => t !== "");
 
@@ -247,7 +222,7 @@ async function main() {
             // A. REMOÇÃO (BLINDADA)
             // Filtra removendo qualquer variação de "revisão de escopo" (maiúscula ou minúscula)
             const tamanhoAntes = listaTags.length;
-            
+
             listaTags = listaTags.filter(tag => {
                 return tag.toLowerCase() !== "revisão de escopo";
             });
@@ -261,7 +236,7 @@ async function main() {
             // B. ADIÇÃO
             // Verifica se já tem "Em revisão" (também ignorando case)
             const jaTemTagNova = listaTags.some(tag => tag.toLowerCase() === "em revisão");
-            
+
             if (!jaTemTagNova) {
                 listaTags.push("Em revisão");
                 console.log("DEBUG - Tag 'Em revisão' adicionada.");
@@ -277,11 +252,11 @@ async function main() {
         ];
 
         if (isApproved) {
-            patchDocument.push({
-                "op": "add",
-                "path": "/fields/" + CAMPO_STATUS,
-                "value": "Sim"
-            });
+            // patchDocument.push({
+            //     "op": "add",
+            //     "path": "/fields/" + CAMPO_STATUS,
+            //     "value": "Sim"
+            // });
             patchDocument.push({
                 "op": "replace",
                 "path": "/fields/System.Tags",
@@ -296,7 +271,7 @@ async function main() {
             }
         }
 
-        
+
 
         await workItemApi.updateWorkItem(null, patchDocument, wiId);
         console.log(`✅ Sucesso! Card ${wiId} atualizado com análise unificada.`);
@@ -305,5 +280,50 @@ async function main() {
         console.error("Erro fatal:", error);
     }
 }
+app.post('/webhook', (req, res) => {
+    // 1. Responde rápido
+    res.status(200).send('Received');
 
-main();
+    const body = req.body;
+    
+    console.log("\n⚡ ---------------------------------------------------");
+    console.log("📦 WEBHOOK RECEBIDO - ANALISANDO ESTRUTURA:");
+    
+    // 2. IMPRIME TUDO PARA A GENTE ACHAR O ID CERTO
+    // Isso vai mostrar o JSON inteiro no seu terminal
+    console.log(JSON.stringify(body, null, 2)); 
+
+    // 3. Tenta identificar o ID de várias formas possíveis
+    let idCandidato = null;
+
+    if (body.resource) {
+        // Tenta pegar o ID direto (padrão)
+        if (body.resource.id) {
+            console.log(`🔎 body.resource.id encontrou: ${body.resource.id}`);
+            idCandidato = body.resource.id;
+        }
+        
+        // Tenta pegar workItemId (comum em alguns eventos)
+        if (body.resource.workItemId) {
+            console.log(`🔎 body.resource.workItemId encontrou: ${body.resource.workItemId}`);
+            idCandidato = body.resource.workItemId;
+        }
+
+        // Tenta pegar de containers de revisão
+        if (body.resource.revision && body.resource.revision.id) {
+             console.log(`🔎 body.resource.revision.id encontrou: ${body.resource.revision.id}`);
+        }
+    }
+
+    // 4. Se achou um ID, tenta processar
+    if (idCandidato) {
+        console.log(`🎯 Tentando processar o ID: ${idCandidato}`);
+        processarCard(idCandidato);
+    } else {
+        console.log("❌ Não consegui encontrar nenhum ID válido neste pacote.");
+    }
+});
+
+app.listen(PORT, () => {
+    console.log(`👀 Servidor rodando na porta ${PORT}. Aguardando Webhooks...`);
+});
