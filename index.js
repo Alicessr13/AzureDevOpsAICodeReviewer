@@ -104,6 +104,26 @@ async function processarCard(ID) {
         let prsParaAnalisar = new Set();
         wiId = ID;
         const workItemCheck = await workItemApi.getWorkItem(wiId, null, null, 1);
+
+        if (!workItemCheck) {
+            console.log("⚠️ Card não encontrado ou sem permissão.");
+            return;
+        }
+
+        const tagsString = workItemCheck.fields['System.Tags'] || "";
+        const tagsArray = tagsString.split(';').map(t => t.trim().toLowerCase());
+
+        const TAG_GATILHO = "revisão de escopo";
+
+        // Se a tag NÃO estiver presente, paramos tudo AGORA.
+        if (!tagsArray.includes(TAG_GATILHO)) {
+            console.log(`⏹️ Ignorando Card ${wiId}: Não possui a tag '${TAG_GATILHO}'.`);
+            return; // <--- O código morre aqui se não tiver a tag
+        }
+
+        console.log(`🚀 Tag '${TAG_GATILHO}' detectada! Iniciando análise completa...`);
+
+
         if (workItemCheck.relations) {
             workItemCheck.relations.forEach(rel => {
                 const url = rel.url ? rel.url.toLowerCase() : '';
@@ -212,15 +232,11 @@ async function processarCard(ID) {
 
         let tagsRaw = (workItem.fields['System.Tags'] || "").split(';');
 
-        // 2. Limpa espaços em branco nas pontas de cada tag
         let listaTags = tagsRaw.map(tag => tag.trim()).filter(t => t !== "");
 
-        // DEBUG: Mostra exatamente o que o código está vendo (entre aspas para ver espaços)
         console.log("DEBUG - Tags lidas:", JSON.stringify(listaTags));
 
         if (isApproved) {
-            // A. REMOÇÃO (BLINDADA)
-            // Filtra removendo qualquer variação de "revisão de escopo" (maiúscula ou minúscula)
             const tamanhoAntes = listaTags.length;
 
             listaTags = listaTags.filter(tag => {
@@ -233,8 +249,6 @@ async function processarCard(ID) {
                 console.log("DEBUG - A tag 'Revisão de escopo' não foi encontrada para remoção (verifique a grafia exata no log acima).");
             }
 
-            // B. ADIÇÃO
-            // Verifica se já tem "Em revisão" (também ignorando case)
             const jaTemTagNova = listaTags.some(tag => tag.toLowerCase() === "em revisão");
 
             if (!jaTemTagNova) {
@@ -252,11 +266,11 @@ async function processarCard(ID) {
         ];
 
         if (isApproved) {
-            // patchDocument.push({
-            //     "op": "add",
-            //     "path": "/fields/" + CAMPO_STATUS,
-            //     "value": "Sim"
-            // });
+            patchDocument.push({
+                "op": "add",
+                "path": "/fields/" + CAMPO_STATUS,
+                "value": "Sim"
+            });
             patchDocument.push({
                 "op": "replace",
                 "path": "/fields/System.Tags",
@@ -280,47 +294,19 @@ async function processarCard(ID) {
         console.error("Erro fatal:", error);
     }
 }
+
 app.post('/webhook', (req, res) => {
-    // 1. Responde rápido
+
     res.status(200).send('Received');
 
     const body = req.body;
     
-    console.log("\n⚡ ---------------------------------------------------");
-    console.log("📦 WEBHOOK RECEBIDO - ANALISANDO ESTRUTURA:");
-    
-    // 2. IMPRIME TUDO PARA A GENTE ACHAR O ID CERTO
-    // Isso vai mostrar o JSON inteiro no seu terminal
-    console.log(JSON.stringify(body, null, 2)); 
+    if (!body || !body.resource) return;
 
-    // 3. Tenta identificar o ID de várias formas possíveis
-    let idCandidato = null;
-
-    if (body.resource) {
-        // Tenta pegar o ID direto (padrão)
-        if (body.resource.id) {
-            console.log(`🔎 body.resource.id encontrou: ${body.resource.id}`);
-            idCandidato = body.resource.id;
-        }
+    if (body.eventType === 'workitem.updated' || body.eventType === 'workitem.created') {
+        const workItemId = body.resource.workItemId;
         
-        // Tenta pegar workItemId (comum em alguns eventos)
-        if (body.resource.workItemId) {
-            console.log(`🔎 body.resource.workItemId encontrou: ${body.resource.workItemId}`);
-            idCandidato = body.resource.workItemId;
-        }
-
-        // Tenta pegar de containers de revisão
-        if (body.resource.revision && body.resource.revision.id) {
-             console.log(`🔎 body.resource.revision.id encontrou: ${body.resource.revision.id}`);
-        }
-    }
-
-    // 4. Se achou um ID, tenta processar
-    if (idCandidato) {
-        console.log(`🎯 Tentando processar o ID: ${idCandidato}`);
-        processarCard(idCandidato);
-    } else {
-        console.log("❌ Não consegui encontrar nenhum ID válido neste pacote.");
+        processarCard(workItemId); 
     }
 });
 
